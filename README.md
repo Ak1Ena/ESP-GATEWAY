@@ -39,15 +39,3 @@ framework = arduino
 lib_deps = h2zero/NimBLE-Arduino @ ^1.4.1
 monitor_speed = 115200
 ```
-
-### โครงสร้างโปรเจค
-- src/main.cpp         : โค้ดหลัก
-- platformio.ini       : ไฟล์ config สำหรับ PlatformIO
-- include/, lib/, test/: โฟลเดอร์มาตรฐาน PlatformIO
-
-### ข้อควรระวัง
-- ต้องแก้ไขค่า WiFi และ serverURL ให้ตรงกับระบบของคุณ
-- ใช้สำหรับงานทดลอง/IoT เท่านั้น ไม่เหมาะกับ production โดยตรง
-
----
-พัฒนาโดย Ak1Ena | สำหรับงาน IoT/Smart Gateway
