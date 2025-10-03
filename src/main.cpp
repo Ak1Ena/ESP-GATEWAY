@@ -2,13 +2,17 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <NimBLEDevice.h>
+#include <WebServer.h>
 
 // --- WiFi Config ---
-const char* ssid = "";
-const char* password = "";
+const char* ssid = "YOUR_SSID";
+const char* password = "YOUR_PASSWORD";
+
+// --- Server Config ---
+WebServer server(80);
 
 // --- REST API Config ---
-const char* serverURL = "http://xxx.xxx.xxx.xxx:3000/api/data";
+const char* serverURL = "http://YOUR_PC_IP:3000/api/data";
 
 // --- BLE Config ---
 #define SERVICE_UUID "12345678-1234-1234-1234-1234567890ab"
@@ -24,86 +28,86 @@ NimBLECharacteristic *pCharacteristic = nullptr;
 // Mapping: conn_handle -> deviceId (user_id)
 std::map<uint16_t, String> clientMap;
 
+// ===== Send message to a connected phone via BLE =====
+void send_to_phone(String phoneId, String message) {
+    for (auto const& pair : clientMap) {
+        if (pair.second == phoneId) {
+            uint16_t connId = pair.first;
+            pCharacteristic->setValue(message.c_str());
+            pCharacteristic->notify(connId);
+            #if SERIAL_DEBUG
+            Serial.printf("Sent to %s (conn=%d): %s\n", phoneId.c_str(), connId, message.c_str());
+            #endif
+            break;
+        }
+    }
+}
+
 // ===== HTTP POST Function =====
 bool sendToWeb(const char* deviceId, const char* data) {
-  if (WiFi.status() != WL_CONNECTED) {
+    if (WiFi.status() != WL_CONNECTED) {
+        #if SERIAL_DEBUG
+        Serial.println("ERROR: WiFi not connected");
+        #endif
+        return false;
+    }
+
+    HTTPClient http;
+    http.begin(serverURL);
+    http.addHeader("Content-Type", "application/json");
+    http.setTimeout(10000); // 10 sec timeout
+
+    String payload = "{\"deviceId\":\"";
+    payload += deviceId;
+    payload += "\",\"data\":\"";
+    payload += data;
+    payload += "\"}";
+
     #if SERIAL_DEBUG
-    Serial.println("ERROR: WiFi not connected");
+    Serial.print("POST to: ");
+    Serial.println(serverURL);
+    Serial.print("Payload: ");
+    Serial.println(payload);
     #endif
-    return false;
-  }
 
-  HTTPClient http;
-  http.begin(serverURL);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(10000); // เพิ่ม timeout เป็น 10 วินาที
+    int code = http.POST(payload);
+    bool success = (code >= 200 && code < 300);
 
-  String payload = "{\"deviceId\":\"";
-  payload += deviceId;
-  payload += "\",\"data\":\"";
-  payload += data;
-  payload += "\"}";
-
-  #if SERIAL_DEBUG
-  Serial.print("POST to: ");
-  Serial.println(serverURL);
-  Serial.print("Payload: ");
-  Serial.println(payload);
-  #endif
-
-  int code = http.POST(payload);
-  bool success = (code >= 200 && code < 300);
-
-  #if SERIAL_DEBUG
-  if (code > 0) {
-    Serial.printf("HTTP Response: %d\n", code);
-    String response = http.getString();
-    if (response.length() > 0) {
-      Serial.print("Response body: ");
-      Serial.println(response);
+    #if SERIAL_DEBUG
+    if (code > 0) {
+        Serial.printf("HTTP Response: %d\n", code);
+        String response = http.getString();
+        if (response.length() > 0) {
+            Serial.print("Response body: ");
+            Serial.println(response);
+        }
+    } else {
+        Serial.printf("HTTP ERROR: %d\n", code);
     }
-  } else {
-    // HTTP Error codes
-    Serial.printf("HTTP ERROR: %d - ", code);
-    switch(code) {
-      case -1:  Serial.println("Connection failed"); break;
-      case -2:  Serial.println("Send header failed"); break;
-      case -3:  Serial.println("Send payload failed"); break;
-      case -4:  Serial.println("Not connected"); break;
-      case -5:  Serial.println("Connection lost"); break;
-      case -6:  Serial.println("No stream"); break;
-      case -7:  Serial.println("No HTTP server"); break;
-      case -8:  Serial.println("Too less RAM"); break;
-      case -9:  Serial.println("Encoding error"); break;
-      case -10: Serial.println("Stream write error"); break;
-      case -11: Serial.println("Read timeout"); break;
-      default:  Serial.println("Unknown error"); break;
-    }
-  }
-  #endif
+    #endif
 
-  http.end();
-  return success;
+    http.end();
+    return success;
 }
 
 // ===== BLE Server Callbacks =====
 class MyServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *pServer, ble_gap_conn_desc *desc) override {
         uint16_t connId = desc->conn_handle;
+        clientMap[connId] = "unknown";
+        pServer->startAdvertising(); // รองรับหลาย connection
         #if SERIAL_DEBUG
         Serial.printf("Connected: conn_id=%d\n", connId);
         #endif
-        clientMap[connId] = "unknown";
-        pServer->startAdvertising(); // รองรับหลาย connection
     }
 
     void onDisconnect(NimBLEServer *pServer, ble_gap_conn_desc *desc) override {
         uint16_t connId = desc->conn_handle;
+        clientMap.erase(connId);
+        pServer->startAdvertising();
         #if SERIAL_DEBUG
         Serial.printf("Disconnected: conn_id=%d\n", connId);
         #endif
-        clientMap.erase(connId);
-        pServer->startAdvertising();
     }
 };
 
@@ -120,37 +124,30 @@ class MyCallbacks : public NimBLECharacteristicCallbacks {
         Serial.printf("Recv from conn_id=%d: %s\n", connId, msg.c_str());
         #endif
 
-        // รูปแบบที่ 1: SET_ID:user123
+        // SET_ID:user123
         if (msg.startsWith("SET_ID:")) {
             String deviceId = msg.substring(7);
             deviceId.trim();
             clientMap[connId] = deviceId;
-            #if SERIAL_DEBUG
-            Serial.printf("Set ID: conn_id=%d -> deviceId=%s\n", connId, deviceId.c_str());
-            #endif
-            
-            // ส่งกลับว่า SET สำเร็จ
             String response = "OK:ID_SET";
             pCharacteristic->setValue(response.c_str());
             pCharacteristic->notify(connId);
             return;
         }
 
-        // รูปแบบที่ 2: deviceId:data หรือแค่ data
-        String deviceId = clientMap[connId]; // ใช้ ID ที่ SET ไว้
+        // deviceId:data หรือแค่ data
+        String deviceId = clientMap[connId];
         String data = msg;
-
-        // ถ้ามี : แปลว่าส่งมาพร้อม deviceId
         int sep = msg.indexOf(':');
         if (sep > 0) {
             deviceId = msg.substring(0, sep);
             data = msg.substring(sep + 1);
         }
 
-        // ส่งไปที่ REST API
+        // ส่งไป REST API
         bool success = sendToWeb(deviceId.c_str(), data.c_str());
 
-        // ส่งผลลัพธ์กลับไปที่มือถือ
+        // ส่งผลลัพธ์กลับมือถือ
         String response = success ? "OK:" : "ERROR:";
         response += data;
         pCharacteristic->setValue(response.c_str());
@@ -165,9 +162,6 @@ void setup() {
     #endif
 
     // ===== WiFi Setup =====
-    #if SERIAL_DEBUG
-    Serial.print("Connecting to WiFi");
-    #endif
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);
 
@@ -180,7 +174,6 @@ void setup() {
         attempts++;
     }
 
-    #if SERIAL_DEBUG
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\nWiFi OK");
         Serial.print("IP: ");
@@ -188,13 +181,50 @@ void setup() {
     } else {
         Serial.println("\nWiFi failed - BLE only mode");
     }
-    #endif
+
+    // ===== WebServer Setup =====
+    server.on("/", []() {
+        server.send(200, "text/plain", "ESP32 BLE Bridge is running");
+    });
+
+    server.on("^/phone/.*", HTTP_POST, []() {
+        String path = server.uri();         // /phone/user123
+        String phoneId = path.substring(7); // ตัด "/phone/"
+        if (!server.hasArg("plain")) {
+            server.send(400, "application/json", "{\"error\":\"body required\"}");
+            return;
+        }
+        String body = server.arg("plain");
+
+        // ดึงค่า message แบบง่าย ๆ
+        int idx = body.indexOf("\"message\"");
+        if (idx == -1) {
+            server.send(400, "application/json", "{\"error\":\"message required\"}");
+            return;
+        }
+        int start = body.indexOf("\"", idx + 9);
+        if (start == -1) {
+            server.send(400, "application/json", "{\"error\":\"invalid JSON\"}");
+            return;
+        }
+        start += 1;
+        int end = body.indexOf("\"", start);
+        if (end == -1) {
+            server.send(400, "application/json", "{\"error\":\"invalid JSON\"}");
+            return;
+        }
+        String message = body.substring(start, end);
+
+        // ส่งไปมือถือ
+        send_to_phone(phoneId, message);
+
+        server.send(200, "application/json",
+                    "{\"status\":\"ok\",\"to\":\"" + phoneId + "\",\"message\":\"" + message + "\"}");
+    });
+
+    server.begin();
 
     // ===== BLE Setup =====
-    #if SERIAL_DEBUG
-    Serial.println("Init BLE...");
-    #endif
-
     NimBLEDevice::init("ESP32_BLE_Server");
     pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(new MyServerCallbacks());
@@ -207,7 +237,6 @@ void setup() {
         NIMBLE_PROPERTY::NOTIFY
     );
     pCharacteristic->setCallbacks(new MyCallbacks());
-
     pService->start();
 
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
@@ -224,6 +253,8 @@ void setup() {
 }
 
 void loop() {
+    server.handleClient(); // ตรวจสอบ WebServer request
+
     // ตรวจสอบ WiFi ทุก 30 วินาที
     static unsigned long lastCheck = 0;
     if (millis() - lastCheck > 30000) {
@@ -235,6 +266,5 @@ void loop() {
         }
         lastCheck = millis();
     }
-
-    delay(100);
+    delay(10);
 }
